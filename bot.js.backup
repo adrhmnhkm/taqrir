@@ -1,0 +1,1062 @@
+
+require('dotenv').config();
+
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+
+const { Telegraf } = require('telegraf');
+const { createClient } = require('@supabase/supabase-js');
+const express = require('express');
+const multer = require('multer');
+const crypto = require('crypto');
+const { parseFile } = require('music-metadata');
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+const ffmpegPath = require('ffmpeg-static');
+
+// =====================================================
+// KONFIGURASI
+// =====================================================
+
+const requiredEnv = [
+    'TELEGRAM_TOKEN',
+    'KENARI_API_KEY',
+    'SUPABASE_URL',
+    'SUPABASE_KEY',
+    'MINI_APP_URL',
+];
+
+for (const key of requiredEnv) {
+    if (!process.env[key]) {
+        throw new Error(`Variabel ${key} belum diisi di .env`);
+    }
+}
+
+const bot = new Telegraf(process.env.TELEGRAM_TOKEN, {
+    handlerTimeout: 900000,
+});
+
+const MINI_APP_URL = process.env.MINI_APP_URL;
+const UPLOAD_PORT = Number(process.env.UPLOAD_PORT || 3000);
+
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_KEY
+);
+
+const INITIAL_QUOTA = 3600;
+const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+const CHUNK_SECONDS = 360;
+const OVERLAP_SECONDS = 2;
+const TELEGRAM_TEXT_LIMIT = 3500;
+
+const uploadDir = path.join(
+    os.tmpdir(),
+    'kajian-miniapp-uploads'
+);
+
+fs.mkdirSync(uploadDir, { recursive: true });
+
+const app = express();
+app.use((req, res, next) => {
+    const startedAt = Date.now();
+
+    console.log(`[HTTP] ${req.method} ${req.url} mulai`);
+
+    req.on('aborted', () => {
+        console.error(
+            `[HTTP] Request dibatalkan: ${req.method} ${req.url}`
+        );
+    });
+
+    res.on('finish', () => {
+        console.log(
+            `[HTTP] ${req.method} ${req.url} selesai`,
+            {
+                status: res.statusCode,
+                durationMs: Date.now() - startedAt,
+            }
+        );
+    });
+
+    res.on('close', () => {
+        if (!res.writableFinished) {
+            console.error(
+                `[HTTP] Koneksi respons terputus: ${req.method} ${req.url}`
+            );
+        }
+    });
+
+    next();
+});
+const upload = multer({
+    dest: uploadDir,
+    limits: {
+        fileSize: MAX_UPLOAD_BYTES,
+        files: 1,
+    },
+});
+
+app.use(express.static(path.join(__dirname, 'miniapp')));
+
+// =====================================================
+// ANTREAN
+// =====================================================
+
+let queue = Promise.resolve();
+
+function enqueue(task) {
+    const next = queue.then(task, task);
+    queue = next.catch(() => {});
+    return next;
+}
+
+function formatDuration(seconds) {
+    seconds = Math.max(0, Math.floor(Number(seconds) || 0));
+
+    return `${Math.floor(seconds / 60)} menit ${seconds % 60} detik`;
+}
+
+// =====================================================
+// VERIFIKASI TELEGRAM MINI APP
+// =====================================================
+
+function verifyTelegramInitData(initData) {
+    if (!initData) return null;
+
+    const params = new URLSearchParams(initData);
+    const receivedHash = params.get('hash');
+
+    if (!receivedHash || !/^[a-f0-9]{64}$/i.test(receivedHash)) {
+        return null;
+    }
+
+    params.delete('hash');
+
+    const authDate = Number(params.get('auth_date'));
+    const now = Math.floor(Date.now() / 1000);
+
+    if (
+        !Number.isSafeInteger(authDate) ||
+        authDate > now + 60 ||
+        now - authDate > 3600
+    ) {
+        return null;
+    }
+
+    const dataCheckString = [...params.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
+
+    const secretKey = crypto
+        .createHmac('sha256', 'WebAppData')
+        .update(process.env.TELEGRAM_TOKEN)
+        .digest();
+
+    const calculatedHash = crypto
+        .createHmac('sha256', secretKey)
+        .update(dataCheckString)
+        .digest('hex');
+
+    const expected = Buffer.from(calculatedHash, 'hex');
+    const received = Buffer.from(receivedHash, 'hex');
+
+    if (
+        expected.length !== received.length ||
+        !crypto.timingSafeEqual(expected, received)
+    ) {
+        return null;
+    }
+
+    try {
+        const user = JSON.parse(params.get('user') || 'null');
+
+        if (!user || !Number.isSafeInteger(user.id)) {
+            return null;
+        }
+
+        return user;
+    } catch {
+        return null;
+    }
+}
+
+// =====================================================
+// SUPABASE DAN KUOTA
+// =====================================================
+
+async function ensureUser(ctx) {
+    const telegramId = ctx.from.id;
+    const username =
+        ctx.from.username ||
+        ctx.from.first_name ||
+        'Hamba Allah';
+
+    const { data: existing, error: findError } = await supabase
+        .from('users')
+        .select('id, sisa_kuota')
+        .eq('telegram_id', telegramId)
+        .maybeSingle();
+
+    if (findError) throw findError;
+
+    if (existing) {
+        const { error } = await supabase
+            .from('users')
+            .update({ username })
+            .eq('telegram_id', telegramId);
+
+        if (error) throw error;
+
+        return existing;
+    }
+
+    const { data: created, error: insertError } = await supabase
+        .from('users')
+        .insert({
+            telegram_id: telegramId,
+            username,
+            sisa_kuota: INITIAL_QUOTA,
+        })
+        .select('id, sisa_kuota')
+        .single();
+
+    if (!insertError) return created;
+
+    if (insertError.code === '23505') {
+        const { data, error } = await supabase
+            .from('users')
+            .select('id, sisa_kuota')
+            .eq('telegram_id', telegramId)
+            .single();
+
+        if (error) throw error;
+        return data;
+    }
+
+    throw insertError;
+}
+
+async function getBalance(telegramId) {
+    const { data, error } = await supabase
+        .from('users')
+        .select('sisa_kuota')
+        .eq('telegram_id', telegramId)
+        .single();
+
+    if (error) throw error;
+
+    return data.sisa_kuota;
+}
+
+async function reserveQuota(telegramId, seconds) {
+    const { data: user, error: readError } = await supabase
+        .from('users')
+        .select('sisa_kuota')
+        .eq('telegram_id', telegramId)
+        .single();
+
+    if (readError) throw readError;
+
+    const currentQuota = Number(user.sisa_kuota);
+
+    if (!Number.isFinite(currentQuota) || currentQuota < seconds) {
+        return false;
+    }
+
+    const { data, error } = await supabase
+        .from('users')
+        .update({ sisa_kuota: currentQuota - seconds })
+        .eq('telegram_id', telegramId)
+        .eq('sisa_kuota', currentQuota)
+        .select('sisa_kuota');
+
+    if (error) throw error;
+
+    return Array.isArray(data) && data.length > 0;
+}
+
+async function refundQuota(telegramId, seconds) {
+    const { data: user, error: readError } = await supabase
+        .from('users')
+        .select('sisa_kuota')
+        .eq('telegram_id', telegramId)
+        .single();
+
+    if (readError) throw readError;
+
+    const currentQuota = Number(user.sisa_kuota);
+
+    if (!Number.isFinite(currentQuota)) {
+        throw new Error('Saldo kuota tidak valid.');
+    }
+
+    const { data, error } = await supabase
+        .from('users')
+        .update({ sisa_kuota: currentQuota + seconds })
+        .eq('telegram_id', telegramId)
+        .eq('sisa_kuota', currentQuota)
+        .select('sisa_kuota');
+
+    if (error) throw error;
+
+    if (!Array.isArray(data) || data.length === 0) {
+        throw new Error(
+            'Pengembalian kuota gagal: saldo berubah saat proses berlangsung.'
+        );
+    }
+}
+
+// =====================================================
+// FFMPEG
+// =====================================================
+
+function runFfmpeg(args) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(ffmpegPath, args, {
+            stdio: ['ignore', 'ignore', 'pipe'],
+        });
+
+        let errorLog = '';
+
+        child.stderr.on('data', (data) => {
+            errorLog = (
+                errorLog + data.toString()
+            ).slice(-4000);
+        });
+
+        child.on('error', reject);
+
+        child.on('close', (code) => {
+            if (code === 0) {
+                resolve();
+            } else {
+                reject(
+                    new Error(`FFmpeg gagal (${code}): ${errorLog}`)
+                );
+            }
+        });
+    });
+}
+
+async function normalizeAudio(inputPath, outputPath) {
+    await runFfmpeg([
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-nostdin',
+        '-y',
+        '-i', inputPath,
+        '-vn',
+        '-ac', '1',
+        '-ar', '24000',
+        '-b:a', '64k',
+        '-f', 'mp3',
+        outputPath,
+    ]);
+}
+
+async function downloadTelegramFile(ctx, fileId, outputPath) {
+    const fileLink = await ctx.telegram.getFileLink(fileId);
+    const response = await fetch(fileLink.href);
+
+    if (!response.ok || !response.body) {
+        throw new Error(
+            `Unduhan Telegram gagal: HTTP ${response.status}`
+        );
+    }
+
+    const declaredSize = Number(
+        response.headers.get('content-length') || 0
+    );
+
+    if (declaredSize > MAX_DOWNLOAD_BYTES) {
+        throw new Error('Ukuran audio melampaui batas bot.');
+    }
+
+    const { Readable, Transform } = require('stream');
+    const { pipeline } = require('stream/promises');
+
+    let received = 0;
+
+    const limiter = new Transform({
+        transform(chunk, encoding, callback) {
+            received += chunk.length;
+
+            if (received > MAX_DOWNLOAD_BYTES) {
+                callback(new Error('Ukuran audio melebihi 20 MiB.'));
+                return;
+            }
+
+            callback(null, chunk);
+        },
+    });
+
+    await pipeline(
+        Readable.fromWeb(response.body),
+        limiter,
+        fs.createWriteStream(outputPath)
+    );
+}
+
+// =====================================================
+// TRANSKRIPSI KENARI
+// =====================================================
+
+const TRANSCRIPTION_PROMPT = `
+Transcribe the entire audio verbatim, from beginning to end.
+Do not summarize, paraphrase, omit, or invent speech.
+Preserve each spoken language and its original script, including Arabic script for Arabic speech.
+Retain repetitions, incomplete sentences, and meaningful filler words.
+Use punctuation for readability without changing the spoken words.
+Mark genuinely unclear speech as [tidak jelas].
+Return only the transcript.
+`;
+
+function normalizeToken(token) {
+    return token
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/\p{M}/gu, '')
+        .replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+function mergeSegments(previous, next) {
+    if (!previous) return next;
+    if (!next) return previous;
+
+    const oldWords = previous.trim().split(/\s+/);
+    const newWords = next.trim().split(/\s+/);
+
+    const maxOverlap = Math.min(
+        25,
+        oldWords.length,
+        newWords.length
+    );
+
+    let overlap = 0;
+
+    for (let count = maxOverlap; count >= 2; count--) {
+        const left = oldWords
+            .slice(-count)
+            .map(normalizeToken);
+
+        const right = newWords
+            .slice(0, count)
+            .map(normalizeToken);
+
+        if (
+            left.every(
+                (word, index) =>
+                    word !== '' && word === right[index]
+            )
+        ) {
+            overlap = count;
+            break;
+        }
+    }
+
+    const remainder = newWords.slice(overlap).join(' ');
+
+    return [previous.trim(), remainder]
+        .filter(Boolean)
+        .join(' ');
+}
+
+async function generateContentWithRetry(filePath, maxAttempts = 3) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const audioBase64 = await fs.promises.readFile(filePath, {
+                encoding: 'base64',
+            });
+
+            const response = await fetch(
+                'https://kenari.id/v1/chat/completions',
+                {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${process.env.KENARI_API_KEY}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        model: 'gemini-3-8-flash',
+                        messages: [
+                            {
+                                role: 'user',
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: TRANSCRIPTION_PROMPT,
+                                    },
+                                    {
+                                        type: 'input_audio',
+                                        input_audio: {
+                                            data: audioBase64,
+                                            format: 'mp3',
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
+                        temperature: 0,
+                        max_tokens: 8192,
+                    }),
+                }
+            );
+
+            const rawBody = await response.text();
+
+            let data;
+            try {
+                data = JSON.parse(rawBody);
+            } catch {
+                throw new Error(
+                    `Respons Kenari bukan JSON. HTTP ${response.status}: ` +
+                    rawBody.slice(0, 500)
+                );
+            }
+
+            if (!response.ok) {
+                const error = new Error(
+                    `Kenari HTTP ${response.status}: ${JSON.stringify(data)}`
+                );
+
+                error.status = response.status;
+                throw error;
+            }
+
+            return data;
+        } catch (error) {
+            const status = Number(error.status);
+            const message = String(error.message || '');
+
+            const retryable =
+                [429, 500, 502, 503, 504].includes(status) ||
+                /ECONNRESET|terminated|fetch failed|timed out/i.test(message);
+
+            if (!retryable || attempt === maxAttempts) {
+                throw error;
+            }
+
+            const delay = 2000 * Math.pow(2, attempt - 1);
+
+            console.log(
+                `Kenari gagal sementara. Percobaan ${attempt}/${maxAttempts}. ` +
+                `Mencoba lagi dalam ${delay / 1000} detik.`
+            );
+
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
+async function transcribeSegment(filePath, segmentNumber) {
+    try {
+        console.log(`[Segmen ${segmentNumber}] Mengirim audio ke Kenari...`);
+
+        const result = await generateContentWithRetry(filePath);
+        const text = result.choices?.[0]?.message?.content?.trim();
+
+        if (!text || typeof text !== 'string') {
+            throw new Error(
+                `Transkrip segmen ${segmentNumber} kosong atau format respons tidak dikenal.`
+            );
+        }
+
+        console.log(`[Segmen ${segmentNumber}] Transkripsi berhasil.`);
+
+        console.log(`[Segmen ${segmentNumber}] Penggunaan token:`, {
+            prompt_tokens: result.usage?.prompt_tokens,
+            completion_tokens: result.usage?.completion_tokens,
+            total_tokens: result.usage?.total_tokens,
+            request_id: result.id,
+        });
+
+        return text;
+    } catch (error) {
+        console.error(
+            `[Segmen ${segmentNumber}] Proses gagal:`,
+            error.message
+        );
+
+        throw error;
+    }
+}
+
+function splitTelegramText(text, limit = TELEGRAM_TEXT_LIMIT) {
+    const chunks = [];
+    let remaining = text.trim();
+
+    while (remaining.length > limit) {
+        let cut = remaining.lastIndexOf('\n', limit);
+
+        if (cut < limit * 0.5) {
+            cut = remaining.lastIndexOf(' ', limit);
+        }
+
+        if (cut < 1) cut = limit;
+
+        chunks.push(remaining.slice(0, cut).trim());
+        remaining = remaining.slice(cut).trim();
+    }
+
+    if (remaining) chunks.push(remaining);
+
+    return chunks;
+}
+
+// =====================================================
+// PEMROSESAN AUDIO
+// =====================================================
+
+async function processAudio(ctx, media, uploaded = null) {
+    const telegramId = uploaded
+        ? uploaded.telegramId
+        : ctx.from.id;
+
+    const duration = Number(
+        uploaded ? uploaded.duration : media?.duration
+    );
+
+    const reply = uploaded
+        ? (text) => bot.telegram.sendMessage(telegramId, text)
+        : (text) => ctx.reply(text);
+
+    const userContext = uploaded
+        ? {
+            from: {
+                id: telegramId,
+                username: uploaded.username,
+                first_name: uploaded.firstName,
+            },
+        }
+        : ctx;
+
+    let reserved = false;
+    let transcriptionComplete = false;
+    let workDir = '';
+
+    try {
+        if (!Number.isInteger(duration) || duration <= 0) {
+            await reply('Durasi audio tidak terbaca.');
+            return;
+        }
+
+        if (
+            !uploaded &&
+            media.file_size &&
+            media.file_size > MAX_DOWNLOAD_BYTES
+        ) {
+            await reply(
+                'Ukuran audio melebihi batas 20 MiB untuk unggahan Telegram.'
+            );
+            return;
+        }
+
+        const user = await ensureUser(userContext);
+
+        if (Number(user.sisa_kuota) < duration) {
+            await reply(
+                `Kuota tidak cukup. Sisa: ${formatDuration(user.sisa_kuota)}.`
+            );
+            return;
+        }
+
+        const reservedSuccessfully = await reserveQuota(
+            telegramId,
+            duration
+        );
+
+        if (!reservedSuccessfully) {
+            const balance = await getBalance(telegramId);
+
+            await reply(
+                `Kuota tidak cukup atau sudah digunakan permintaan lain.\n` +
+                `Sisa kuota: ${formatDuration(balance)}.`
+            );
+
+            return;
+        }
+
+        reserved = true;
+
+        await reply(
+            `Audio diterima (${formatDuration(duration)}).\n` +
+            'Kuota dicadangkan. Mulai memproses audio...'
+        );
+
+        workDir = await fs.promises.mkdtemp(
+            path.join(os.tmpdir(), 'kajian-transkrip-')
+        );
+
+        const originalPath = path.join(workDir, 'original.bin');
+        const normalizedPath = path.join(workDir, 'normalized.mp3');
+
+        if (uploaded) {
+            await fs.promises.copyFile(
+                uploaded.filePath,
+                originalPath
+            );
+        } else {
+            await downloadTelegramFile(
+                ctx,
+                media.file_id,
+                originalPath
+            );
+        }
+
+        await reply('🎧 Menyesuaikan format audio...');
+
+        await normalizeAudio(originalPath, normalizedPath);
+
+        const transcripts = [];
+        const starts = [0];
+
+        while (true) {
+            const previousStart = starts[starts.length - 1];
+            const previousEnd = previousStart + CHUNK_SECONDS;
+
+            if (duration - previousEnd <= OVERLAP_SECONDS) {
+                break;
+            }
+
+            starts.push(
+                previousStart + CHUNK_SECONDS - OVERLAP_SECONDS
+            );
+        }
+
+        for (let i = 0; i < starts.length; i++) {
+            const start = starts[i];
+
+            const segmentPath = path.join(
+                workDir,
+                `segment-${i + 1}.mp3`
+            );
+
+            const segmentDuration = Math.min(
+                CHUNK_SECONDS,
+                duration - start
+            );
+
+            await reply(
+                `🧠 Transkripsi segmen ${i + 1}/${starts.length}...`
+            );
+
+            await runFfmpeg([
+                '-hide_banner',
+                '-loglevel', 'error',
+                '-nostdin',
+                '-y',
+                '-ss', String(start),
+                '-i', normalizedPath,
+                '-t', String(segmentDuration),
+                '-vn',
+                '-ac', '1',
+                '-ar', '24000',
+                '-b:a', '64k',
+                '-f', 'mp3',
+                segmentPath,
+            ]);
+
+            const transcript = await transcribeSegment(
+                segmentPath,
+                i + 1
+            );
+
+            transcripts.push(transcript);
+
+            await fs.promises.unlink(segmentPath).catch(() => {});
+        }
+
+        let finalTranscript = '';
+
+        for (const transcript of transcripts) {
+            finalTranscript = mergeSegments(
+                finalTranscript,
+                transcript
+            );
+        }
+
+        if (!finalTranscript.trim()) {
+            throw new Error('Hasil transkripsi kosong.');
+        }
+
+        transcriptionComplete = true;
+
+        const remaining = await getBalance(telegramId).catch(() => null);
+        const chunks = splitTelegramText(finalTranscript);
+
+        for (let i = 0; i < chunks.length; i++) {
+            let message = chunks[i];
+
+            if (i === chunks.length - 1 && remaining !== null) {
+                message +=
+                    `\n\n---\nSisa kuota: ${formatDuration(remaining)}`;
+            }
+
+            await reply(message);
+        }
+    } catch (error) {
+        console.error('Kesalahan pemrosesan audio:', error);
+
+        if (reserved && !transcriptionComplete) {
+            try {
+                await refundQuota(telegramId, duration);
+                console.log(
+                    `Kuota pengguna ${telegramId} berhasil dikembalikan.`
+                );
+            } catch (refundError) {
+                console.error('REFUND KUOTA GAGAL:', refundError);
+            }
+        }
+
+        try {
+            await reply(
+                transcriptionComplete
+                    ? 'Transkripsi sudah selesai, tetapi pengiriman hasil terganggu. Periksa log server sebelum mencoba ulang.'
+                    : 'Transkripsi gagal. Kuota dikembalikan jika refund berhasil. Silakan coba lagi.'
+            );
+        } catch (replyError) {
+            console.error(
+                'Gagal mengirim notifikasi Telegram:',
+                replyError.message
+            );
+        }
+    } finally {
+        if (workDir) {
+            await fs.promises.rm(workDir, {
+                recursive: true,
+                force: true,
+            }).catch((error) => {
+                console.error(
+                    'Gagal membersihkan folder sementara:',
+                    error.message
+                );
+            });
+        }
+    }
+}
+
+// =====================================================
+// MINI APP: STATUS DAN UNGGAHAN
+// =====================================================
+
+app.get('/health', (req, res) => {
+    res.json({ ok: true });
+});
+
+app.post('/api/upload', (req, res) => {
+    const user = verifyTelegramInitData(
+        req.get('X-Telegram-Init-Data')
+    );
+
+    if (!user) {
+        return res.status(401).json({
+            error: 'Autentikasi Telegram tidak valid. Buka melalui Mini App.',
+        });
+    }
+
+    upload.single('audio')(req, res, async (error) => {
+        if (error) {
+            if (error.code === 'LIMIT_FILE_SIZE') {
+                return res.status(413).json({
+                    error: 'Ukuran file maksimal 100 MiB.',
+                });
+            }
+
+            if (error.code === 'LIMIT_FILE_COUNT') {
+                return res.status(400).json({
+                    error: 'Unggah satu file audio saja.',
+                });
+            }
+
+            console.error('Kesalahan unggahan:', error.message);
+
+            return res.status(400).json({
+                error: 'Unggahan tidak valid atau gagal.',
+            });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({
+                error: 'File audio belum dipilih.',
+            });
+        }
+
+        try {
+            const metadata = await parseFile(req.file.path);
+            const duration = Math.ceil(Number(metadata.format.duration));
+
+            if (!Number.isSafeInteger(duration) || duration <= 0) {
+                throw new Error('Durasi audio tidak valid.');
+            }
+
+            const uploaded = {
+                telegramId: user.id,
+                username: user.username,
+                firstName: user.first_name,
+                duration,
+                filePath: req.file.path,
+            };
+
+            // Pastikan antrean menerima pekerjaan sebelum memberi respons.
+            const job = enqueue(async () => {
+                try {
+                    await processAudio(null, null, uploaded);
+                } finally {
+                    await fs.promises.unlink(req.file.path).catch((err) => {
+                        console.error(
+                            'Gagal menghapus unggahan:',
+                            err.message
+                        );
+                    });
+                }
+            });
+
+            // Antrean berjalan di latar belakang; hasil dikirim melalui bot.
+            job.catch((err) => {
+                console.error('Pekerjaan unggahan gagal:', err);
+            });
+
+            return res.status(202).json({
+                ok: true,
+                message:
+                    'Unggahan diterima dan masuk antrean. Hasil akan dikirim melalui Telegram.',
+                duration,
+                size: req.file.size,
+            });
+        } catch (err) {
+            await fs.promises.unlink(req.file.path).catch(() => {});
+
+            console.error(
+                'Gagal menyiapkan unggahan:',
+                err.message
+            );
+
+            if (!res.headersSent) {
+                return res.status(400).json({
+                    error:
+                        'File tidak dapat dibaca sebagai audio yang valid.',
+                });
+            }
+        }
+    });
+});
+
+// =====================================================
+// COMMAND TELEGRAM
+// =====================================================
+
+bot.start(async (ctx) => {
+    try {
+        await ensureUser(ctx);
+
+        await ctx.reply(
+            'Assalamu’alaikum!\n\n' +
+            'Kirim audio kajian melalui chat, atau gunakan tombol ' +
+            'di bawah untuk mengunggah file audio berukuran besar.\n\n' +
+            'Gunakan /kuota untuk melihat sisa kuota.\n\n' +
+            'Pengguna baru mendapat kuota awal 60 menit. ' +
+            'Perintah /start tidak mereset kuota.',
+            {
+                reply_markup: {
+                    inline_keyboard: [[
+                        {
+                            text: '🎙️ Unggah Audio Besar',
+                            web_app: {
+                                url: MINI_APP_URL,
+                            },
+                        },
+                    ]],
+                },
+            }
+        );
+    } catch (error) {
+        console.error('Gagal menjalankan /start:', error);
+
+        await ctx.reply(
+            'Maaf, pendaftaran belum berhasil. Coba lagi nanti.'
+        );
+    }
+});
+
+bot.command('kuota', async (ctx) => {
+    try {
+        const user = await ensureUser(ctx);
+
+        await ctx.reply(
+            `📊 Sisa kuota: ${formatDuration(user.sisa_kuota)}.`
+        );
+    } catch (error) {
+        console.error('Gagal membaca kuota:', error);
+
+        await ctx.reply(
+            'Maaf, kuota belum bisa diperiksa. Coba lagi nanti.'
+        );
+    }
+});
+
+// =====================================================
+// HANDLER AUDIO TELEGRAM
+// =====================================================
+
+bot.on(['voice', 'audio'], async (ctx) => {
+    const media = ctx.message.voice || ctx.message.audio;
+
+    await ctx.reply('Permintaan diterima dan masuk antrean.');
+
+    await enqueue(() => processAudio(ctx, media));
+});
+
+bot.catch((error) => {
+    console.error('Kesalahan handler Telegram:', error);
+});
+
+// =====================================================
+// JALANKAN BOT DAN SERVER MINI APP
+// =====================================================
+
+const uploadServer = app.listen(
+    UPLOAD_PORT,
+    '127.0.0.1',
+    () => {
+        console.log(
+            `Server Mini App aktif di http://127.0.0.1:${UPLOAD_PORT}`
+        );
+        console.log('Batas unggahan: 100 MiB');
+    }
+);
+
+uploadServer.on('error', (error) => {
+    console.error(
+        'Server Mini App gagal dijalankan:',
+        error.message
+    );
+    process.exitCode = 1;
+});
+
+bot.launch()
+    .then(() => {
+        console.log('✅ Bot transkripsi siap menerima audio.');
+    })
+    .catch((error) => {
+        console.error('Bot gagal dijalankan:', error);
+        process.exitCode = 1;
+    });
+
+function shutdown(signal) {
+    console.log(`Menghentikan layanan (${signal})...`);
+
+    bot.stop(signal);
+
+    uploadServer.close(() => {
+        console.log('Server Mini App dihentikan.');
+    });
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));

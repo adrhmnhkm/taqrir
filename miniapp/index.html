@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>Transkrip Kajian</title>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg-color: var(--tg-theme-bg-color, #f8fafc);
+            --card-bg: var(--tg-theme-secondary-bg-color, #ffffff);
+            --text-color: var(--tg-theme-text-color, #0f172a);
+            --hint-color: var(--tg-theme-hint-color, #64748b);
+            --btn-color: var(--tg-theme-button-color, #0d9488);
+            --btn-text: var(--tg-theme-button-text-color, #ffffff);
+            --border-color: rgba(148, 163, 184, 0.2);
+            --accent-soft: rgba(13, 148, 136, 0.08);
+            --danger-color: #ef4444;
+            --success-color: #10b981;
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px 16px 28px;
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-color);
+            color: var(--text-color);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .container {
+            max-width: 440px;
+            width: 100%;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 24px;
+        }
+
+        .badge-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--accent-soft);
+            color: var(--btn-color);
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            border: 1px solid rgba(13, 148, 136, 0.15);
+        }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            margin: 0 0 6px 0;
+            letter-spacing: -0.02em;
+        }
+
+        .subtitle {
+            font-size: 13.5px;
+            line-height: 1.5;
+            color: var(--hint-color);
+            margin: 0;
+        }
+
+        /* Dropzone / Upload Box */
+        .dropzone {
+            position: relative;
+            background: var(--card-bg);
+            border: 2px dashed var(--border-color);
+            border-radius: 20px;
+            padding: 32px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.03);
+        }
+
+        .dropzone.dragover {
+            border-color: var(--btn-color);
+            background: var(--accent-soft);
+            transform: scale(0.99);
+        }
+
+        .dropzone input[type="file"] {
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
+            width: 100%;
+            height: 100%;
+        }
+
+        .upload-icon-wrap {
+            width: 56px;
+            height: 56px;
+            margin: 0 auto 14px;
+            border-radius: 16px;
+            background: var(--accent-soft);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--btn-color);
+            transition: transform 0.2s ease;
+        }
+
+        .dropzone:active .upload-icon-wrap {
+            transform: scale(0.92);
+        }
+
+        .dropzone-title {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .dropzone-hint {
+            font-size: 12px;
+            color: var(--hint-color);
+        }
+
+        /* File Selected Card */
+        .file-card {
+            display: none;
+            align-items: center;
+            gap: 12px;
+            background: var(--card-bg);
+            padding: 14px 16px;
+            border-radius: 16px;
+            margin-top: 14px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.02);
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .file-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            background: var(--accent-soft);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--btn-color);
+            flex-shrink: 0;
+        }
+
+        .file-meta {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .file-name {
+            font-size: 13.5px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 2px;
+        }
+
+        .file-size {
+            font-size: 11.5px;
+            color: var(--hint-color);
+        }
+
+        .btn-remove {
+            background: none;
+            border: none;
+            padding: 6px;
+            cursor: pointer;
+            color: var(--hint-color);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-remove:hover {
+            color: var(--danger-color);
+            background: rgba(239, 68, 68, 0.08);
+        }
+
+        /* Upload Progress Bar */
+        .progress-box {
+            display: none;
+            margin-top: 18px;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+
+        .progress-track {
+            height: 8px;
+            width: 100%;
+            background: rgba(148, 163, 184, 0.2);
+            border-radius: 999px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            width: 0%;
+            height: 100%;
+            background: var(--btn-color);
+            border-radius: 999px;
+            transition: width 0.2s ease;
+        }
+
+        /* Status Toast */
+        .status-msg {
+            display: none;
+            margin-top: 16px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            font-size: 13px;
+            line-height: 1.45;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-msg.error {
+            display: flex;
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--danger-color);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        .status-msg.success {
+            display: flex;
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success-color);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        /* Actions */
+        .actions {
+            margin-top: 24px;
+        }
+
+        .btn-primary {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 14px;
+            background: var(--btn-color);
+            color: var(--btn-text);
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 14px rgba(13, 148, 136, 0.25);
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-primary:active:not(:disabled) {
+            transform: scale(0.98);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        .footer-note {
+            text-align: center;
+            font-size: 11.5px;
+            color: var(--hint-color);
+            margin-top: 20px;
+        }
+    </style>
+</head>
+
+<body>
+<div class="container">
+    <div class="header">
+        <div class="badge-pill">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            AI Notulensi & Faidah
+        </div>
+        <h1>Unggah Audio Kajian</h1>
+        <p class="subtitle">Format otomatis: Transkrip utuh kata-per-kata + intisari faidah dan lafaz Arab di akhir.</p>
+    </div>
+
+    <!-- Dropzone Area -->
+    <div class="dropzone" id="dropzone">
+        <input id="audio" type="file" accept="audio/*,.mp3,.m4a,.wav,.ogg,.webm,.aac">
+        <div class="upload-icon-wrap">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+        </div>
+        <div class="dropzone-title">Pilih atau seret audio ke sini</div>
+        <div class="dropzone-hint">MP3, M4A, WAV, atau Voice Note (Maks. 100 MB)</div>
+    </div>
+
+    <!-- File Preview Card -->
+    <div class="file-card" id="fileCard">
+        <div class="file-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 18V5l12-2v13"></path>
+                <circle cx="6" cy="18" r="3"></circle>
+                <circle cx="18" cy="16" r="3"></circle>
+            </svg>
+        </div>
+        <div class="file-meta">
+            <div class="file-name" id="fileName">rekaman-kajian.mp3</div>
+            <div class="file-size" id="fileSize">0 MB</div>
+        </div>
+        <button class="btn-remove" id="btnRemove" title="Hapus file">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+    </div>
+
+    <!-- Upload Progress -->
+    <div class="progress-box" id="progressBox">
+        <div class="progress-header">
+            <span id="progressStatus">Mengunggah file...</span>
+            <span id="progressPercent">0%</span>
+        </div>
+        <div class="progress-track">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+    </div>
+
+    <!-- Status Message / Alert -->
+    <div id="statusBox" class="status-msg" role="alert"></div>
+
+    <!-- Action Button -->
+    <div class="actions">
+        <button id="uploadButton" class="btn-primary" disabled>
+            <span>Mulai Transkripsi</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+        </button>
+    </div>
+</div>
+
+<div class="footer-note">
+    ⚡ Hasil transkrip dan dokumen akan langsung dikirimkan ke chat bot.
+</div>
+
+<script>
+    const tg = window.Telegram?.WebApp;
+
+    const audioInput = document.getElementById('audio');
+    const dropzone = document.getElementById('dropzone');
+    const fileCard = document.getElementById('fileCard');
+    const fileName = document.getElementById('fileName');
+    const fileSize = document.getElementById('fileSize');
+    const btnRemove = document.getElementById('btnRemove');
+    const uploadButton = document.getElementById('uploadButton');
+    const progressBox = document.getElementById('progressBox');
+    const progressFill = document.getElementById('progressFill');
+    const progressPercent = document.getElementById('progressPercent');
+    const progressStatus = document.getElementById('progressStatus');
+    const statusBox = document.getElementById('statusBox');
+
+    const MAX_SIZE = 100 * 1024 * 1024;
+
+    if (tg) {
+        tg.ready();
+        tg.expand();
+        tg.enableClosingConfirmation();
+    }
+
+    function formatBytes(bytes) {
+        return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    }
+
+    function showStatus(text, type = 'error') {
+        statusBox.className = `status-msg ${type}`;
+        statusBox.innerHTML = `
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+            <span>${text}</span>
+        `;
+        statusBox.style.display = 'flex';
+    }
+
+    function resetFileSelection() {
+        audioInput.value = '';
+        fileCard.style.display = 'none';
+        dropzone.style.display = 'block';
+        uploadButton.disabled = true;
+        progressBox.style.display = 'none';
+        statusBox.style.display = 'none';
+    }
+
+    // Drag-and-drop effects
+    ['dragenter', 'dragover'].forEach(name => {
+        dropzone.addEventListener(name, (e) => {
+            e.preventDefault();
+            dropzone.classList.add('dragover');
+        });
+    });
+
+    ['dragleave', 'drop'].forEach(name => {
+        dropzone.addEventListener(name, (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('dragover');
+        });
+    });
+
+    audioInput.addEventListener('change', () => {
+        const file = audioInput.files[0];
+        statusBox.style.display = 'none';
+
+        if (!file) {
+            resetFileSelection();
+            return;
+        }
+
+        if (file.size > MAX_SIZE) {
+            showStatus('Ukuran file melebihi batas 100 MB.', 'error');
+            resetFileSelection();
+            return;
+        }
+
+        if (file.size === 0) {
+            showStatus('File audio kosong / tidak valid.', 'error');
+            resetFileSelection();
+            return;
+        }
+
+        // Tampilkan info file
+        fileName.textContent = file.name;
+        fileSize.textContent = formatBytes(file.size);
+        dropzone.style.display = 'none';
+        fileCard.style.display = 'flex';
+        uploadButton.disabled = false;
+
+        // Feedback haptic Telegram
+        tg?.HapticFeedback?.impactOccurred('light');
+    });
+
+    btnRemove.addEventListener('click', () => {
+        resetFileSelection();
+        tg?.HapticFeedback?.notificationOccurred('warning');
+    });
+
+    uploadButton.addEventListener('click', () => {
+        const file = audioInput.files[0];
+        if (!file || file.size > MAX_SIZE) return;
+
+        if (!tg?.initData) {
+            showStatus('Silakan buka halaman ini lewat Mini App Telegram.', 'error');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('audio', file);
+
+        const xhr = new XMLHttpRequest();
+
+        uploadButton.disabled = true;
+        btnRemove.style.display = 'none';
+        progressBox.style.display = 'block';
+        progressFill.style.width = '0%';
+        progressPercent.textContent = '0%';
+        progressStatus.textContent = 'Menyiapkan berkas...';
+        statusBox.style.display = 'none';
+
+        tg?.HapticFeedback?.impactOccurred('medium');
+
+        xhr.open('POST', '/api/upload');
+        xhr.setRequestHeader('X-Telegram-Init-Data', tg.initData);
+
+        xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+                const percent = Math.round((event.loaded / event.total) * 100);
+                progressFill.style.width = percent + '%';
+                progressPercent.textContent = percent + '%';
+                progressStatus.textContent = percent === 100 ? 'Memproses ke server...' : 'Mengunggah audio...';
+            }
+        };
+
+        xhr.onload = () => {
+            let result;
+            try {
+                result = JSON.parse(xhr.responseText);
+            } catch {
+                result = {};
+            }
+
+            if (xhr.status >= 200 && xhr.status < 300) {
+                tg?.HapticFeedback?.notificationOccurred('success');
+                showStatus('Audio berhasil diunggah! Bot sedang memproses transkrip.', 'success');
+                setTimeout(() => {
+                    tg?.close();
+                }, 1800);
+            } else {
+                tg?.HapticFeedback?.notificationOccurred('error');
+                showStatus(result.error || `Gagal mengunggah (${xhr.status})`, 'error');
+                uploadButton.disabled = false;
+                btnRemove.style.display = 'flex';
+            }
+        };
+
+        xhr.onerror = () => {
+            tg?.HapticFeedback?.notificationOccurred('error');
+            showStatus('Koneksi terputus. Pastikan internet stabil.', 'error');
+            uploadButton.disabled = false;
+            btnRemove.style.display = 'flex';
+        };
+
+        xhr.send(formData);
+    });
+</script>
+</body>
+</html>
