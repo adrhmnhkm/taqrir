@@ -2583,9 +2583,9 @@ async function shutdown(signal) {
 
     if (process.env.WEBHOOK_DOMAIN) {
         await bot.telegram.deleteWebhook().catch(() => {});
+    } else {
+        bot.stop(signal);
     }
-
-    bot.stop(signal);
 
     if (uploadServer) {
         uploadServer.close(() => {
