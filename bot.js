@@ -1930,8 +1930,8 @@ bot.hears('📞 Top-up & Bantuan', async (ctx) => {
         `• 1 Jam (60 menit) = Rp 10.000\n` +
         `• 3 Jam (180 menit) = Rp 25.000\n\n` +
         `💳 **Cara Top-up:**\n` +
-        `1. Transfer ke BCA: 123456789 (a.n Fulan)\n` +
-        `2. Atau Gopay/Qris: 08123456789\n` +
+        `1. Transfer ke Bank Jago Syariah: 503885989416 (a.n Adi Rahman Hakim)\n` +
+        `2. Atau Gopay: 081287930672\n` +
         `3. Kirimkan bukti transfer beserta **ID Telegram** Anda ke kontak admin.\n\n` +
         `👨🏻‍💻 Kontak Admin: @diar699`, // <--- Ganti dengan username Telegram aslimu
         { parse_mode: 'Markdown' }
