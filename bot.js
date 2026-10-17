@@ -274,6 +274,23 @@ const upload = multer({
 app.use(express.static(path.join(__dirname, 'miniapp')));
 
 // =====================================================
+// WEBHOOK TELEGRAM (didaftarkan sebelum app.listen)
+// =====================================================
+
+if (process.env.WEBHOOK_DOMAIN) {
+    app.post('/bot-webhook', express.json({ strict: false }), async (req, res) => {
+        console.log('[Webhook] Update masuk:', JSON.stringify(req.body)?.slice(0, 100));
+        res.sendStatus(200);
+        try {
+            await bot.handleUpdate(req.body);
+        } catch (err) {
+            console.error('[Webhook] handleUpdate error:', err.message);
+        }
+    });
+    console.log('[Webhook] Route /bot-webhook terdaftar.');
+}
+
+// =====================================================
 // ANTREAN
 // =====================================================
 
@@ -2546,17 +2563,8 @@ uploadServer.on('error', (error) => {
 async function startApp() {
     try {
         if (process.env.WEBHOOK_DOMAIN) {
-            const webhookPath = '/bot-webhook';
-            const webhookUrl = `https://${process.env.WEBHOOK_DOMAIN}${webhookPath}`;
+            const webhookUrl = `https://${process.env.WEBHOOK_DOMAIN}/bot-webhook`;
             await bot.telegram.setWebhook(webhookUrl);
-            app.post(webhookPath, express.json(), async (req, res) => {
-                res.sendStatus(200);
-                try {
-                    await bot.handleUpdate(req.body);
-                } catch (err) {
-                    console.error('[Webhook] Error:', err.message);
-                }
-            });
             console.log(`✅ Webhook aktif: ${webhookUrl}`);
         } else {
             bot.launch();
