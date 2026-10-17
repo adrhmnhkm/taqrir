@@ -2251,6 +2251,104 @@ bot.command('monitor_user', async (ctx) => {
 });
 
 // =====================================================
+// COMMAND daftaruser — daftar semua pengguna
+
+bot.command('daftaruser', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+
+    try {
+        const { data: users, error } = await supabase
+            .from('users')
+            .select('telegram_id, username, sisa_kuota, created_at')
+            .order('sisa_kuota', { ascending: false });
+
+        if (error) throw error;
+
+        if (!users || users.length === 0) {
+            return ctx.reply('Belum ada pengguna terdaftar.');
+        }
+
+        const lines = users.map((u, i) => {
+            const name = u.username ? `@${u.username}` : `ID:${u.telegram_id}`;
+            const kuota = formatDuration(u.sisa_kuota ?? 0);
+            return `${i + 1}. ${name} — ${kuota}`;
+        });
+
+        const header = `👥 DAFTAR PENGGUNA (${users.length} akun)\n\n`;
+        const chunks = [];
+        let current = header;
+
+        for (const line of lines) {
+            if ((current + line + '\n').length > 4000) {
+                chunks.push(current);
+                current = '';
+            }
+            current += line + '\n';
+        }
+        if (current) chunks.push(current);
+
+        for (const chunk of chunks) {
+            await ctx.reply(chunk);
+        }
+    } catch (error) {
+        console.error('[DaftarUser] Error:', error);
+        await ctx.reply('Gagal membaca data pengguna.');
+    }
+});
+
+// =====================================================
+// COMMAND broadcast — kirim pesan ke semua pengguna
+
+bot.command('broadcast', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+
+    const text = ctx.message.text.replace(/^\/broadcast\s*/i, '').trim();
+
+    if (!text) {
+        return ctx.reply(
+            'Format:\n/broadcast <pesan>\n\n' +
+            'Contoh:\n/broadcast Halo! Taqrir sudah diperbarui.'
+        );
+    }
+
+    try {
+        const { data: users, error } = await supabase
+            .from('users')
+            .select('telegram_id');
+
+        if (error) throw error;
+
+        if (!users || users.length === 0) {
+            return ctx.reply('Belum ada pengguna terdaftar.');
+        }
+
+        await ctx.reply(`📢 Mengirim ke ${users.length} pengguna...`);
+
+        let sukses = 0;
+        let gagal = 0;
+
+        for (const user of users) {
+            try {
+                await bot.telegram.sendMessage(user.telegram_id, text);
+                sukses++;
+            } catch {
+                gagal++;
+            }
+            // jeda kecil supaya tidak kena rate limit Telegram
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        await ctx.reply(
+            `✅ Broadcast selesai.\n\n` +
+            `Berhasil: ${sukses}\nGagal: ${gagal}`
+        );
+    } catch (error) {
+        console.error('[Broadcast] Error:', error);
+        await ctx.reply('Gagal menjalankan broadcast.');
+    }
+});
+
+// =====================================================
 // COMMAND konfirmasi judul dan tombol
 // =====================================================
 
