@@ -2549,7 +2549,7 @@ async function startApp() {
             const webhookPath = '/bot-webhook';
             const webhookUrl = `https://${process.env.WEBHOOK_DOMAIN}${webhookPath}`;
             await bot.telegram.setWebhook(webhookUrl);
-            app.use(bot.webhookCallback(webhookPath));
+            app.post(webhookPath, bot.webhookCallback(webhookPath));
             console.log(`✅ Webhook aktif: ${webhookUrl}`);
         } else {
             bot.launch();
