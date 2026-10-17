@@ -1925,8 +1925,8 @@ bot.hears('📊 Cek Kuota', async (ctx) => {
 bot.hears('📞 Top-up & Bantuan', async (ctx) => {
     await ctx.reply(
         `📞 *Bantuan & Penambahan Kuota*\n\n` +
-        `Bot ini memproses audio menggunakan server AI. Untuk menjaga server tetap berjalan, penambahan kuota dilakukan melalui sistem infaq.\n\n` +
-        `**Paket Infaq:**\n` +
+        `Bot ini memproses audio menggunakan server AI. Untuk menjaga server tetap berjalan, penambahan kuota dilakukan melalui sistem topup.\n\n` +
+        `**Paket Topup:**\n` +
         `• 1 Jam (60 menit) = Rp 10.000\n` +
         `• 3 Jam (180 menit) = Rp 25.000\n\n` +
         `💳 **Cara Top-up:**\n` +
