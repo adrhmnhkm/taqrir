@@ -2550,11 +2550,11 @@ async function startApp() {
             const webhookUrl = `https://${process.env.WEBHOOK_DOMAIN}${webhookPath}`;
             await bot.telegram.setWebhook(webhookUrl);
             app.post(webhookPath, express.json(), async (req, res) => {
+                res.sendStatus(200);
                 try {
-                    await bot.handleUpdate(req.body, res);
+                    await bot.handleUpdate(req.body);
                 } catch (err) {
                     console.error('[Webhook] Error:', err.message);
-                    res.sendStatus(500);
                 }
             });
             console.log(`✅ Webhook aktif: ${webhookUrl}`);
